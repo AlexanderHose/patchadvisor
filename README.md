@@ -32,6 +32,10 @@ Raw CVE dumps waste engineering time. PatchAdvisor correlates OS Config vulnerab
 
 Every GCP API call runs under the Slack operator's own Google Cloud identity via 3-legged OAuth 2.0 + PKCE. No shared service account god-mode.
 
+<p align="center">
+  <img src="PatchAdvisorSlack.png" alt="PatchAdvisor in Slack: Autonomous Triage, SCC Correlation, and 1-Click Actions" width="100%" />
+</p>
+
 ---
 
 ## Setup & Deployment Guide
