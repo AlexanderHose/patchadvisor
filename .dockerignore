@@ -1,0 +1,12 @@
+agent-remediation/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+.env
+.DS_Store
+remediation_agent/
