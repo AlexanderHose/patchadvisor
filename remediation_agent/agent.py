@@ -24,9 +24,12 @@ def _clear_user_credentials(callback_context):
 
 
 _MUTATING_TOOLS = frozenset({
+    "create_boot_disk_snapshot",
     "apply_osconfig_patch",
     "rollback_vm_to_snapshot",
-    "create_boot_disk_snapshot",
+    "update_firewall_rule",
+    "set_vm_metadata",
+    "set_scc_finding_mute",
 })
 
 
@@ -63,14 +66,14 @@ async def _finalize_and_persist_memory(callback_context):
 
 safe_remediation_pipeline = LoopAgent(
     name="safe_remediation_pipeline",
-    description="Self-healing canary-to-production remediation loop: snapshots, patches canary first, validates guest inventory and systemd health, auto-rolls back and isolates broken packages on failure, promotes verified Tier 1 and Tier 2 packages to production, and emits learned package memory.",
+    description="Confirmation-gated remediation and verification loop: executes confirmed canary or production OS patching, firewall containment, VM metadata hardening, SCC finding mutes, or snapshot rollbacks, then verifies runtime and log health.",
     sub_agents=[remediator_agent, validator_agent],
-    max_iterations=3,
+    max_iterations=2,
 )
 
 root_agent = Agent(
     name="remediation_agent",
-    description="Root orchestrator for self-learning, canary-first vulnerability triage and autonomous remediation.",
+    description="Root orchestrator for read-only vulnerability/SCC triage and confirmation-gated remediation.",
     model=MODEL,
     instruction=ROOT_AGENT_INSTR,
     tools=[preload_memory],
@@ -82,5 +85,3 @@ for _agent in (root_agent, investigator_agent, safe_remediation_pipeline, remedi
     _agent.after_agent_callback = _clear_user_credentials
 
 safe_remediation_pipeline.after_agent_callback = _finalize_and_persist_memory
-
-

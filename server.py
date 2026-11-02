@@ -48,20 +48,28 @@ _gcp_auth_request = google.auth.transport.requests.Request()
 
 _ACTION_PROMPTS: dict[str, tuple[str, str]] = {
     "patch_tier_1": (
-        "Remediate the Tier 1 (Zero-Downtime Live Updates) packages identified in this session using reboot_policy=NEVER. Create a pre-patch boot disk snapshot first, apply the OS Config patch job, and verify runtime health.",
-        "🚀 *Tier 1 Remediation Approved:* Creating pre-patch boot disk snapshot and applying Tier 1 live updates...",
+        "Confirm and remediate the Tier 1 (Zero-Downtime Live Updates) packages identified in this session on the target/canary VM using reboot_policy=NEVER. Create a pre-patch boot disk snapshot first, apply the OS Config patch job, and verify runtime and log health.",
+        "🚀 *Tier 1 Remediation Confirmed:* Creating pre-patch boot disk snapshot and applying Tier 1 live updates...",
     ),
     "patch_tier_2": (
-        "Remediate the Tier 2 (Daemon Restarts) packages identified in this session using reboot_policy=NEVER. Create a pre-patch boot disk snapshot first, apply the OS Config patch job, and verify runtime health.",
-        "🚀 *Tier 2 Remediation Approved:* Creating pre-patch boot disk snapshot and applying Tier 2 updates...",
+        "Confirm and remediate the Tier 2 (Daemon Restarts) packages identified in this session on the target/canary VM using reboot_policy=NEVER. Create a pre-patch boot disk snapshot first, apply the OS Config patch job, and verify runtime and log health.",
+        "🚀 *Tier 2 Remediation Confirmed:* Creating pre-patch boot disk snapshot and applying Tier 2 updates...",
+    ),
+    "promote_to_prod": (
+        "Confirm and promote the verified canary packages in this session to the production VM(s) using reboot_policy=NEVER. Create a pre-patch boot disk snapshot first, apply the OS Config patch job, and verify runtime and log health.",
+        "🚀 *Production Promotion Confirmed:* Creating pre-patch boot disk snapshot and promoting verified packages to production...",
     ),
     "approve_prod_reboot": (
-        "Approve and execute host reboot remediation (reboot_policy=REBOOT_IF_NEEDED) for the pending Tier 3 / reboot-required packages in this session. Create a pre-patch boot disk snapshot first and verify post-reboot runtime health.",
-        "🔴 *Host Reboot Approved:* Creating pre-patch boot disk snapshot and applying updates with REBOOT_IF_NEEDED...",
+        "Confirm and execute host reboot remediation (reboot_policy=REBOOT_IF_NEEDED) for the pending Tier 3 / reboot-required packages in this session. Create a pre-patch boot disk snapshot first and verify post-reboot runtime and log health.",
+        "🔴 *Host Reboot Confirmed:* Creating pre-patch boot disk snapshot and applying updates with REBOOT_IF_NEEDED...",
+    ),
+    "apply_posture_fix": (
+        "Confirm and apply the top recommended cloud posture remediation (VPC firewall restriction via update_firewall_rule or VM metadata hardening via set_vm_metadata) identified in this session and verify the updated state.",
+        "🛡️ *Posture Remediation Confirmed:* Applying confirmed firewall/metadata hardening...",
     ),
     "rollback_snapshot": (
-        "Immediately roll back the target VM in this session to its latest pre-patch boot disk snapshot using rollback_vm_to_snapshot and verify runtime health.",
-        "⏪ *Rollback Initiated:* Restoring target VM boot disk from pre-patch snapshot...",
+        "Confirm and immediately roll back the target VM in this session to its latest pre-patch boot disk snapshot using rollback_vm_to_snapshot (looking up the snapshot via list_disk_snapshots if needed) and verify runtime health.",
+        "⏪ *Rollback Confirmed:* Restoring target VM boot disk from pre-patch snapshot...",
     ),
     "rescan_vulnerabilities": (
         "Re-scan and investigate the active target in this session.",
@@ -315,10 +323,12 @@ def _btn(label: str, action_id: str, style: str | None = None) -> dict:
 def build_action_buttons(report_text: str) -> list[dict]:
     if any(k in report_text for k in ("🛠️ Remediation Report", "✅ Post-Patch Verification")):
         btns = [_btn("🔄 Re-scan", "rescan_vulnerabilities")]
+        if any(k in report_text for k in ("CANARY VERIFIED", "PROMOTE TO PROD", "CANARY_STAGE")):
+            btns.append(_btn("🚀 Promote to Prod", "promote_to_prod", "primary"))
         if any(k in report_text for k in ("Reboot Required", "reboot_required=True")):
             btns.append(_btn("🔴 Approve Prod Reboot", "approve_prod_reboot", "primary"))
         btns.append(_btn("⏪ Rollback", "rollback_snapshot", "danger"))
-        return btns
+        return btns[:5]
 
     btns = []
     if "Tier 1" in report_text:
@@ -327,9 +337,11 @@ def build_action_buttons(report_text: str) -> list[dict]:
         btns.append(_btn("🟡 Patch Tier 2", "patch_tier_2"))
     if "Tier 3" in report_text:
         btns.append(_btn("🔴 Approve Prod Reboot", "approve_prod_reboot", "danger"))
+    if any(k in report_text for k in ("🚨 SCC", "SCC Posture", "Compensating Control", "update_firewall_rule", "set_vm_metadata")):
+        btns.append(_btn("🛡️ Apply Posture Fix", "apply_posture_fix"))
     if any(k in report_text for k in ("*📊 Scope*", "Executive Verdict")):
         btns.append(_btn("🔄 Re-scan", "rescan_vulnerabilities"))
-    return btns
+    return btns[:5]
 
 
 def markdown_to_slack_blocks(report_text: str) -> list[dict]:
@@ -361,7 +373,14 @@ def format_sse_progress(event: dict) -> str | None:
         fc = part.get("function_call") or part.get("functionCall")
         if isinstance(fc, dict) and fc.get("name"):
             args = fc.get("args", {}) or {}
-            target = args.get("instance_name") or args.get("agent_name") or args.get("project_id") or ""
+            target = (
+                args.get("instance_name")
+                or args.get("firewall_rule_name")
+                or args.get("agent_name")
+                or args.get("project_id")
+                or args.get("org_id")
+                or ""
+            )
             return f"🔧 Running `{fc['name']}`{f' (`{target}`)' if target else ''}..."
     if any(p.get("thought") for p in parts):
         return f"🧠 *[{event.get('author') or 'agent'}]* Synthesizing findings..."
@@ -453,10 +472,8 @@ async def execute_agent_and_reply(
         return
 
     session = get_session(thread_ts)
-    scope_m = re.search(r"(?:project|org(?:anization)?)[=:\s]+([a-zA-Z0-9_\-]+)", prompt, re.IGNORECASE)
-    if scope_m and scope_m.group(1) != session.scope:
+    if not session.scope and (scope_m := re.search(r"(?:project|org(?:anization)?)[=:\s]+([a-zA-Z0-9_\-]+)", prompt, re.IGNORECASE)):
         session.scope = scope_m.group(1)
-        session.agent_session_id = None
 
     ack = await slack_post(channel_id, thread_ts, text=ack_text)
     agent_session_id = await ensure_agent_session(session, channel_id, thread_ts)

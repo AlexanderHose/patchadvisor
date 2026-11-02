@@ -4,7 +4,38 @@ import asyncio
 from datetime import datetime, timezone
 import json
 from google.cloud import compute_v1
-from . import get_boot_disk_info, get_disks_client, get_instances_client
+from . import get_boot_disk_info, get_disks_client, get_instances_client, get_snapshots_client
+
+
+async def list_disk_snapshots(project_id: str, instance_name: str = "") -> str:
+    """Lists Compute Engine disk snapshots in a project, sorted newest first.
+
+    Args:
+        project_id: GCP project ID.
+        instance_name: Optional VM instance or boot disk name filter.
+    """
+    client = get_snapshots_client()
+    needle = instance_name.strip().lower()
+    try:
+        snaps = await asyncio.to_thread(lambda: list(client.list(project=project_id)))
+    except Exception as exc:
+        return json.dumps({"error": f"Failed to list disk snapshots: {exc}"}, indent=2)
+
+    records = [
+        {
+            "name": s.name,
+            "status": s.status,
+            "source_disk": (s.source_disk or "").split("/")[-1],
+            "disk_size_gb": s.disk_size_gb,
+            "creation_timestamp": s.creation_timestamp,
+            "description": s.description,
+        }
+        for s in snaps
+        if not needle or needle in (s.name or "").lower() or needle in (s.source_disk or "").lower()
+    ]
+    records.sort(key=lambda r: r["creation_timestamp"] or "", reverse=True)
+    return json.dumps({"project_id": project_id, "snapshots": records[:25]}, indent=2)
+
 
 
 async def create_boot_disk_snapshot(project_id: str, zone: str, instance_name: str) -> str:
@@ -88,11 +119,6 @@ async def rollback_vm_to_snapshot(
         if not old_boot_device:
             return json.dumps({"status": "FAILED", "error": f"No boot disk device found on {instance_name}."})
 
-        stop_op = await asyncio.to_thread(
-            instances_client.stop, project=project_id, zone=zone, instance=instance_name
-        )
-        await asyncio.to_thread(stop_op.result, timeout=180)
-
         disk_op = await asyncio.to_thread(
             disks_client.insert,
             project=project_id,
@@ -103,6 +129,18 @@ async def rollback_vm_to_snapshot(
             ),
         )
         await asyncio.to_thread(disk_op.result, timeout=180)
+        if getattr(disk_op, "error_code", None):
+            return json.dumps({
+                "status": "FAILED",
+                "instance_name": instance_name,
+                "snapshot_name": snapshot_name,
+                "error": f"{disk_op.error_code}: {disk_op.error_message}",
+            }, indent=2)
+
+        stop_op = await asyncio.to_thread(
+            instances_client.stop, project=project_id, zone=zone, instance=instance_name
+        )
+        await asyncio.to_thread(stop_op.result, timeout=180)
 
         detach_op = await asyncio.to_thread(
             instances_client.detach_disk,

@@ -1,9 +1,12 @@
 """VM runtime health and OS Config patch job verification tools."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from itertools import islice
 import json
 import proto
-from . import get_instances_client, get_osconfig_client
+from google.cloud import logging_v2
+from . import get_instances_client, get_logging_client, get_osconfig_client
 
 
 async def check_vm_runtime_health(project_id: str, zone: str, instance_name: str) -> str:
@@ -56,3 +59,52 @@ async def verify_patch_compliance(project_id: str, patch_job_id: str) -> str:
         "patch_job": proto.Message.to_dict(job, use_integers_for_enums=False),
         "instance_details": [proto.Message.to_dict(d, use_integers_for_enums=False) for d in details],
     }, indent=2)
+
+
+async def get_vm_system_logs(
+    project_id: str,
+    zone: str,
+    instance_name: str,
+    minutes: int = 30,
+) -> str:
+    """Retrieves recent Cloud Logging entries (syslog, systemd, OSConfigAgent) for a Compute Engine VM.
+
+    Args:
+        project_id: GCP project ID.
+        zone: Compute Engine zone (e.g. us-central1-c).
+        instance_name: VM instance name.
+        minutes: Lookback window in minutes (default 30).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max(1, min(minutes, 1440)))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    safe_inst = instance_name.strip().replace('"', "")
+    safe_zone = zone.strip().replace('"', "")
+    log_filter = (
+        f'resource.type="gce_instance" AND timestamp>="{cutoff}" '
+        f'AND (labels."compute.googleapis.com/resource_name"="{safe_inst}" OR "{safe_inst}")'
+    )
+    if safe_zone:
+        log_filter += f' AND resource.labels.zone="{safe_zone}"'
+
+    client = get_logging_client()
+    req = logging_v2.types.ListLogEntriesRequest(
+        resource_names=[f"projects/{project_id}"],
+        filter=log_filter,
+        order_by="timestamp desc",
+        page_size=40,
+    )
+    try:
+        entries = await asyncio.to_thread(lambda: list(islice(client.list_log_entries(request=req), 40)))
+    except Exception as exc:
+        return json.dumps({"instance": instance_name, "error": f"Failed to query Cloud Logging: {exc}"}, indent=2)
+
+    records = []
+    for e in entries:
+        msg = e.text_payload or (dict(e.json_payload) if e.json_payload else "")
+        records.append({
+            "timestamp": str(e.timestamp or ""),
+            "severity": getattr(e.severity, "name", str(e.severity or "DEFAULT")),
+            "log_name": (e.log_name or "").split("/")[-1],
+            "message": str(msg)[:400],
+        })
+    return json.dumps({"instance": instance_name, "zone": zone, "entries_count": len(records), "entries": records}, indent=2)
+

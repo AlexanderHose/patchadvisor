@@ -5,6 +5,8 @@ opentelemetry-exporter-otlp-proto-grpc
 opentelemetry-exporter-otlp-proto-http
 opentelemetry-exporter-gcp-logging
 google-cloud-compute>=1.30.0
+google-cloud-logging>=3.10.0
 google-cloud-os-config>=1.15.0
+google-cloud-resource-manager>=1.14.0
 google-cloud-securitycenter>=1.32.0
 python-dotenv>=1.0.0

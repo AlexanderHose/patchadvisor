@@ -3,7 +3,7 @@
 from contextvars import ContextVar
 from functools import lru_cache
 import os
-from google.cloud import compute_v1, osconfig_v1, securitycenter_v2
+from google.cloud import compute_v1, logging_v2, osconfig_v1, resourcemanager_v3, securitycenter_v2
 from google.oauth2.credentials import Credentials
 
 _user_access_token: ContextVar[str | None] = ContextVar("_user_access_token", default=None)
@@ -35,6 +35,14 @@ def get_disks_client() -> compute_v1.DisksClient:
     return _get_client(compute_v1.DisksClient)
 
 
+def get_snapshots_client() -> compute_v1.SnapshotsClient:
+    return _get_client(compute_v1.SnapshotsClient)
+
+
+def get_firewalls_client() -> compute_v1.FirewallsClient:
+    return _get_client(compute_v1.FirewallsClient)
+
+
 def get_osconfig_client() -> osconfig_v1.OsConfigServiceClient:
     return _get_client(osconfig_v1.OsConfigServiceClient)
 
@@ -47,6 +55,18 @@ def get_scc_v2_client() -> securitycenter_v2.SecurityCenterClient:
     return _get_client(securitycenter_v2.SecurityCenterClient)
 
 
+def get_logging_client() -> logging_v2.services.logging_service_v2.LoggingServiceV2Client:
+    return _get_client(logging_v2.services.logging_service_v2.LoggingServiceV2Client)
+
+
+def get_projects_client() -> resourcemanager_v3.ProjectsClient:
+    return _get_client(resourcemanager_v3.ProjectsClient)
+
+
+def get_organizations_client() -> resourcemanager_v3.OrganizationsClient:
+    return _get_client(resourcemanager_v3.OrganizationsClient)
+
+
 def get_boot_disk_info(instance: compute_v1.Instance) -> tuple[str | None, str | None]:
     """Return (boot_disk_name, device_name) from a Compute Engine Instance."""
     for disk in instance.disks:
@@ -56,35 +76,56 @@ def get_boot_disk_info(instance: compute_v1.Instance) -> tuple[str | None, str |
     return None, None
 
 
-from .health_check import check_vm_runtime_health, verify_patch_compliance
+from .firewall import get_firewall_rule, update_firewall_rule
+from .health_check import check_vm_runtime_health, get_vm_system_logs, verify_patch_compliance
 from .osconfig import (
+    apply_osconfig_patch,
     get_guest_inventory,
     get_vm_instance,
     get_vulnerability_report,
     list_project_vms,
+    set_vm_metadata,
 )
-from .osconfig_patch import apply_osconfig_patch
-from .scc import get_scc_findings
-from .snapshot import create_boot_disk_snapshot, rollback_vm_to_snapshot
+from .resourcemanager import list_accessible_organizations, list_accessible_projects
+from .scc import (
+    get_scc_attack_paths,
+    get_scc_findings,
+    set_scc_finding_mute,
+)
+from .snapshot import create_boot_disk_snapshot, list_disk_snapshots, rollback_vm_to_snapshot
 
 
 __all__ = [
     "set_user_access_token",
     "get_instances_client",
     "get_disks_client",
+    "get_snapshots_client",
+    "get_firewalls_client",
     "get_osconfig_client",
     "get_osconfig_zonal_client",
     "get_scc_v2_client",
+    "get_logging_client",
+    "get_projects_client",
+    "get_organizations_client",
     "get_boot_disk_info",
+    "list_accessible_projects",
+    "list_accessible_organizations",
     "list_project_vms",
     "get_vm_instance",
     "get_vulnerability_report",
     "get_guest_inventory",
     "get_scc_findings",
+    "get_scc_attack_paths",
+    "set_scc_finding_mute",
+    "get_firewall_rule",
+    "update_firewall_rule",
+    "set_vm_metadata",
+    "list_disk_snapshots",
     "create_boot_disk_snapshot",
     "rollback_vm_to_snapshot",
     "apply_osconfig_patch",
     "check_vm_runtime_health",
+    "get_vm_system_logs",
     "verify_patch_compliance",
 ]
 
