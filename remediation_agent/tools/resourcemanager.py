@@ -23,7 +23,6 @@ async def list_accessible_projects(query: str = "") -> str:
         {
             "project_id": p.project_id,
             "display_name": p.display_name,
-            "parent": p.parent,
         }
         for p in projs
         if getattr(p.state, "name", str(p.state)) == "ACTIVE"

@@ -23,7 +23,7 @@ def _build_client(client_cls, token: str):
 def _get_client(client_cls):
     token = _user_access_token.get()
     if not token:
-        raise PermissionError("Missing user Google OAuth access token. Authenticate via Slack first.")
+        raise PermissionError("Missing user Google OAuth access token. Authenticate first.")
     return _build_client(client_cls, token)
 
 
