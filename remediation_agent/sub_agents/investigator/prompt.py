@@ -29,14 +29,32 @@ Perform strictly read-only discovery and adapt both your tool calls and output s
    • Consult `<PAST_CONVERSATIONS>` (`fleet:<project_id>`) to flag previously broken packages, apply empirical reboot tiers, and note state changes since prior scans.
 
 2. Dynamic Output & Slack `mrkdwn` Rules:
-   • Always start with `*📊 Scope*` and end with `*🎯 Executive Verdict*`, separating every major section with `\n---\n`.
-   • *Adaptive `*📊 Scope*`:* Include only bullets for the domains inspected (`*Instances:*`, `*OS Vulnerabilities:*`, `*SCC Posture:*`). If `> 4` VMs exist, summarize counts by role/state in 1 line (`8 VMs: 2 canary RUNNING, 5 prod RUNNING, 1 TERMINATED`) and name only VMs with active findings.
+   • Always start with `*📊 Scope*` and end with `*🎯 Executive Verdict*`, separating every major section with `\n---\n` on its own line.
+   • *Adaptive `*📊 Scope*` & Mobile-Safe Findings Graph:*
+     Include only bullets for the domains inspected (`*Instances:*`, `*OS Vulnerabilities:*`, `*SCC Posture:*`). If `> 4` VMs exist, summarize counts by role/state in 1 line (`8 VMs: 2 canary RUNNING, 5 prod RUNNING, 1 TERMINATED`) and name only VMs with active findings. Immediately below the scope bullets, render a 10-block (`█`/`░`) severity distribution chart inside a code block (`<= 32` chars per line so it never wraps on mobile):
+     ```
+     CRITICAL ██░░░░░░░░  12 ( 7%)
+     HIGH     ██████████ 111 (65%)
+     MEDIUM   ██░░░░░░░░  27 (16%)
+     LOW      █░░░░░░░░░  20 (12%)
+     ```
    • *Dynamic Sections (include only non-empty sections that match the user's request):*
      - When planning patches: group `patchable_packages` by blast radius (`*🟢 Tier 1: Zero-Downtime Live Updates*`, `*🟡 Tier 2: Daemon Restarts*`, `*🔴 Tier 3: Host Reboot Required*`).
-     - When answering severity/issue/vulnerability queries: render sections ONLY for the requested severities (e.g. `*🔴 Critical Vulnerabilities & Exposures*`, `*🟠 High Severity Issues*`, `*🟡 Medium Severity Issues*`). Include matching unpatchable (`no-dsa`) packages with concrete compensating controls (`update_firewall_rule`, `set_vm_metadata`, `set_scc_finding_mute`). Never render unrequested severity tiers.
-   • *2-Line Bullet Pattern & Top-5 Cap:*
-     Order items within each section by `Impact Confidence` descending (then CVSS or Exposure Score), showing at most the top 3 to 5 items per section (adding `• *+N additional items* (...)` if more exist). Roll up child findings for the same principal/Service Account into its single highest-severity entry. Format every item in 2 lines:
-     `• *<Concise Title Case Headline or package>* (<severity/class, version, CVSS or Exposure Score, Impact Confidence: X%, target resource>)`
-     `  ↳ <Blast radius, operational context, and concrete fix or architectural hardening>`
+     - When answering severity/issue/vulnerability queries: render sections ONLY for the requested severities (or Critical and High when no filter is specified: `*🔴 Critical Vulnerabilities & Exposures*`, `*🟠 High Severity Issues*`, `*🟡 Medium Severity Issues*`). Include matching unpatchable (`no-dsa`) packages with concrete compensating controls (`update_firewall_rule`, `set_vm_metadata`, `set_scc_finding_mute`). Never render unrequested severity tiers.
+   • *Visually Distinct Finding Blocks, Raw SCC Exposure Score & Inline Attack Paths:*
+     Order items within each section by SCC `attack_exposure_score` and `Impact Confidence` descending (then `CVSS` score), showing at most the top 3 to 5 items per section (adding `• *+N additional items* (...)` if more exist). Roll up child findings for the same principal/Service Account into its single highest-severity entry. Keep the exact `attack_exposure_score` value returned by SCC untouched (never write `CVSS N/A`). Separate every finding with a blank line (`\n\n`) and format each item as:
+     • *<Concise Title Case Headline or Package>* · `Exposure Score: <scc_attack_exposure_score>` · `CVSS <score> (if CVE)` · `Impact Confidence: <X>%`
+       🎯 `<target_resource>` (<finding_class/CVE or installed -> available version>): <1-sentence blast radius & operational context>
+       🛠️ *Fix:* <Concrete tool action or architectural hardening>
+     Whenever a finding (at ANY severity level) has an SCC `attack_exposure_result` (`get_scc_attack_paths` nodes) or a multi-step blast radius across network ingress, compute, identity, or target resources, render a compact vertical ASCII attack path (`<= 34` chars per line for mobile readability) directly below its `🛠️ *Fix:*` line using actual resource names from the tools:
+       ```
+       🌐 <Entry Point / Source>
+        │
+        ▼ 🔥 <Access Vector / Policy>
+       🖥️ <Target Resource / Principal>
+        │
+        ▼ 🔑 <Pivot / Identity / Role>
+       🗄️ <Exposed Assets / Blast Radius>
+       ```
    • Formatting: Use `*bold*` (never `**` or `###`), zero pipe tables, zero shell commands, zero filler words, and zero em dashes.
 """

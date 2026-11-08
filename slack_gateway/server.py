@@ -12,15 +12,15 @@ import os
 import re
 import secrets
 import time
-from urllib.parse import parse_qs, urlencode
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from urllib.parse import urlencode
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import google.auth
 import google.auth.transport.requests
 import httpx
-from slack_sdk import WebClient
+from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from slack_bolt.async_app import AsyncApp
 from slack_sdk.errors import SlackApiError
-from slack_sdk.signature import SignatureVerifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("remediation-agent")
@@ -40,8 +40,13 @@ _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/cloud-platform"
 
-slack_client = WebClient(token=SLACK_BOT_TOKEN) if SLACK_BOT_TOKEN else None
-_signature_verifier = SignatureVerifier(SLACK_SIGNING_SECRET) if SLACK_SIGNING_SECRET else None
+bolt_app = AsyncApp(
+    token=SLACK_BOT_TOKEN or "xoxb-placeholder",
+    signing_secret=SLACK_SIGNING_SECRET or "placeholder",
+    token_verification_enabled=False,
+)
+slack_handler = AsyncSlackRequestHandler(bolt_app)
+slack_client = bolt_app.client if SLACK_BOT_TOKEN else None
 _gcp_credentials = None
 _default_project = None
 _gcp_auth_request = google.auth.transport.requests.Request()
@@ -161,11 +166,11 @@ def _derive_pkce_verifier(state: str) -> str:
 async def slack_post(channel: str, thread_ts: str | None = None, **kwargs) -> dict:
     if not slack_client:
         return {}
-    return await asyncio.to_thread(slack_client.chat_postMessage, channel=channel, thread_ts=thread_ts, **kwargs)
+    return await slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, **kwargs)
 
 
 async def prompt_google_login(
-    request: Request,
+    base_url: str,
     slack_user_id: str,
     channel_id: str,
     thread_ts: str,
@@ -176,7 +181,6 @@ async def prompt_google_login(
 ) -> None:
     if not slack_client:
         return
-    base_url = _gateway_base_url(request)
     state_payload = {
         "u": slack_user_id,
         "c": channel_id,
@@ -220,14 +224,14 @@ async def prompt_google_login(
     }
     if in_existing_thread:
         ephemeral_kwargs["thread_ts"] = thread_ts
-    await asyncio.to_thread(slack_client.chat_postEphemeral, **ephemeral_kwargs)
+    await slack_client.chat_postEphemeral(**ephemeral_kwargs)
 
 
 async def slack_update(channel: str, ts: str | None, **kwargs) -> None:
     if not slack_client or not ts:
         return
     try:
-        await asyncio.to_thread(slack_client.chat_update, channel=channel, ts=ts, **kwargs)
+        await slack_client.chat_update(channel=channel, ts=ts, **kwargs)
     except Exception:
         pass
 
@@ -337,7 +341,7 @@ def build_action_buttons(report_text: str) -> list[dict]:
         btns.append(_btn("🟡 Patch Tier 2", "patch_tier_2"))
     if "Tier 3" in report_text:
         btns.append(_btn("🔴 Approve Prod Reboot", "approve_prod_reboot", "danger"))
-    if any(k in report_text for k in ("🚨 SCC", "SCC Posture", "Compensating Control", "update_firewall_rule", "set_vm_metadata")):
+    if any(k in report_text for k in ("🚨 SCC", "SCC Posture", "Compensating Control", "update_firewall_rule", "set_vm_metadata", "set_scc_finding_mute")):
         btns.append(_btn("🛡️ Apply Posture Fix", "apply_posture_fix"))
     if any(k in report_text for k in ("*📊 Scope*", "Executive Verdict")):
         btns.append(_btn("🔄 Re-scan", "rescan_vulnerabilities"))
@@ -347,7 +351,7 @@ def build_action_buttons(report_text: str) -> list[dict]:
 def markdown_to_slack_blocks(report_text: str) -> list[dict]:
     if not report_text or not report_text.strip():
         return []
-    sections = [s.strip() for s in re.split(r"(?:^|\n)---+(?:\n|$)", report_text.strip()) if s.strip()]
+    sections = [s.strip() for s in re.split(r"(?:^|\n)[ \t]*---+[ \t]*(?:\n|$)", report_text.strip()) if s.strip()]
     blocks: list[dict] = []
     for sec in sections:
         if blocks:
@@ -599,97 +603,78 @@ async def google_oauth_callback(background_tasks: BackgroundTasks, code: str = "
     )
 
 
-@app.post("/slack/events")
-@app.post("/slack/actions")
-async def slack_events(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_slack_request_timestamp: str = Header(None),
-    x_slack_signature: str = Header(None),
-    x_slack_retry_num: str = Header(None),
-):
-    if x_slack_retry_num:
-        return JSONResponse(content={"status": "ignored_retry"}, status_code=200)
+@bolt_app.action("google_oauth_login")
+async def handle_oauth_login_button(ack, body: dict):
+    await ack()
+    slack_user_id = body.get("user", {}).get("id", "")
+    resp_url = body.get("response_url", "")
+    if slack_user_id and resp_url.startswith("https://hooks.slack.com/"):
+        if len(AUTH_RESPONSE_URLS) >= 500:
+            AUTH_RESPONSE_URLS.pop(next(iter(AUTH_RESPONSE_URLS)), None)
+        AUTH_RESPONSE_URLS[slack_user_id] = resp_url
+        logger.info(f"Captured ephemeral auth response_url for user {slack_user_id}")
 
-    body = await request.body()
-    ts = x_slack_request_timestamp or ""
-    sig = x_slack_signature or ""
-    if not (_signature_verifier and ts.isdigit() and _signature_verifier.is_valid(body=body, timestamp=ts, signature=sig)):
-        raise HTTPException(status_code=401, detail="Invalid Slack signature")
 
-    if "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
-        form = parse_qs(body.decode("utf-8", errors="replace"))
-        payload = json.loads(form.get("payload", ["{}"])[0])
-        if payload.get("type") == "block_actions" and payload.get("actions"):
-            action_id = payload["actions"][0].get("action_id", "")
-            slack_user_id = payload.get("user", {}).get("id", "")
-            if action_id == "google_oauth_login":
-                resp_url = payload.get("response_url", "")
-                if slack_user_id and resp_url.startswith("https://hooks.slack.com/"):
-                    if len(AUTH_RESPONSE_URLS) >= 500:
-                        AUTH_RESPONSE_URLS.pop(next(iter(AUTH_RESPONSE_URLS)), None)
-                    AUTH_RESPONSE_URLS[slack_user_id] = resp_url
-                    logger.info(f"Captured ephemeral auth response_url for user {slack_user_id}")
-                return JSONResponse(content={"status": "oauth_redirect"}, status_code=200)
-            channel_id = payload.get("channel", {}).get("id")
-            thread_ts = payload.get("container", {}).get("thread_ts") or payload.get("container", {}).get("message_ts")
-            if action_id in _ACTION_PROMPTS and channel_id and thread_ts and slack_user_id:
-                prompt, ack = _ACTION_PROMPTS[action_id]
-                user_token = get_user_token(slack_user_id)
-                if not user_token:
-                    await prompt_google_login(
-                        request,
-                        slack_user_id,
-                        channel_id,
-                        thread_ts,
-                        prompt,
-                        ack,
-                        in_existing_thread=True,
-                    )
-                else:
-                    background_tasks.add_task(execute_agent_and_reply, channel_id, thread_ts, prompt, ack, user_token)
-        return JSONResponse(content={"status": "accepted"}, status_code=200)
-
-    data = json.loads(body)
-    if data.get("type") == "url_verification":
-        return {"challenge": data.get("challenge")}
-
-    event = data.get("event", {})
-    if event.get("type") == "app_mention":
-        slack_user_id = event.get("user", "")
-        channel_id = event.get("channel")
-        thread_ts = event.get("thread_ts")
-        clean_text = re.sub(r"<@[A-Z0-9]+>", "", event.get("text", "")).strip()
-
-        if not clean_text or (clean_text.lower() in {"help", "hi", "hello"} and not thread_ts):
-            await slack_post(
-                channel_id,
-                thread_ts or event.get("ts"),
-                text="Specify a VM instance or GCP project/organization to triage.\nExample: `@PatchAdvisor investigate <instance-name> in project <project-id> and zone <zone>`",
-            )
-            return JSONResponse(content={"status": "help_provided"}, status_code=200)
-
-        is_in_thread = bool(thread_ts)
-        if not thread_ts:
-            thread_ts = event.get("ts")
-
+@bolt_app.action(re.compile(r"^(patch_|promote_|approve_|apply_|rollback_|rescan_)"))
+async def handle_remediation_action(ack, body: dict, action: dict, context: dict):
+    await ack()
+    action_id = action.get("action_id", "")
+    slack_user_id = body.get("user", {}).get("id", "")
+    channel_id = body.get("channel", {}).get("id")
+    thread_ts = body.get("container", {}).get("thread_ts") or body.get("container", {}).get("message_ts")
+    if action_id in _ACTION_PROMPTS and channel_id and thread_ts and slack_user_id:
+        prompt, ack_text = _ACTION_PROMPTS[action_id]
         user_token = get_user_token(slack_user_id)
         if not user_token:
             await prompt_google_login(
-                request,
+                context.get("base_url", PUBLIC_GATEWAY_URL),
                 slack_user_id,
                 channel_id,
                 thread_ts,
-                clean_text,
-                in_existing_thread=is_in_thread,
+                prompt,
+                ack_text,
+                in_existing_thread=True,
             )
         else:
-            background_tasks.add_task(
-                execute_agent_and_reply,
-                channel_id,
-                thread_ts,
-                clean_text,
-                user_token=user_token,
-            )
+            asyncio.create_task(execute_agent_and_reply(channel_id, thread_ts, prompt, ack_text, user_token))
 
-    return JSONResponse(content={"status": "accepted"}, status_code=200)
+
+@bolt_app.event("app_mention")
+async def handle_app_mention(event: dict, context: dict):
+    slack_user_id = event.get("user", "")
+    channel_id = event.get("channel")
+    thread_ts = event.get("thread_ts")
+    clean_text = re.sub(r"<@[A-Z0-9]+>", "", event.get("text", "")).strip()
+
+    if not clean_text or (clean_text.lower() in {"help", "hi", "hello"} and not thread_ts):
+        await slack_post(
+            channel_id,
+            thread_ts or event.get("ts"),
+            text="Specify a VM instance or GCP project/organization to triage.\nExample: `@PatchAdvisor investigate <instance-name> in project <project-id> and zone <zone>`",
+        )
+        return
+
+    is_in_thread = bool(thread_ts)
+    if not thread_ts:
+        thread_ts = event.get("ts")
+
+    user_token = get_user_token(slack_user_id)
+    if not user_token:
+        await prompt_google_login(
+            context.get("base_url", PUBLIC_GATEWAY_URL),
+            slack_user_id,
+            channel_id,
+            thread_ts,
+            clean_text,
+            in_existing_thread=is_in_thread,
+        )
+    else:
+        asyncio.create_task(execute_agent_and_reply(channel_id, thread_ts, clean_text, user_token=user_token))
+
+
+@app.post("/slack/events")
+@app.post("/slack/actions")
+async def slack_events(request: Request):
+    if request.headers.get("x-slack-retry-num"):
+        return JSONResponse(content={"status": "ignored_retry"}, status_code=200)
+    return await slack_handler.handle(request, addition_context_properties={"base_url": _gateway_base_url(request)})
